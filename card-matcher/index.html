@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
-<title>Card Matcher Prototype</title>
+<title>Card Matcher Prototype v2</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#111;color:#eee}
@@ -20,9 +20,9 @@ main{padding:12px 16px;max-width:900px;margin:auto}
 #result.match{background:#2d4f9f}
 #result.fail{background:#8a2c2c}
 #detail{font-size:13px;color:#bbb;font-weight:400;margin-top:6px}
-#views{display:flex;gap:10px;margin:10px 0}
+#views{display:flex;gap:8px;margin:10px 0}
 #views div{flex:1;text-align:center;font-size:12px;color:#999}
-#views canvas{width:100%;max-height:260px;object-fit:contain;background:#000;border-radius:8px}
+#views canvas{width:100%;max-height:240px;object-fit:contain;background:#000;border-radius:8px}
 #groups{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:10px;margin-top:8px}
 .g{background:#222;border-radius:10px;padding:8px;text-align:center;border:2px solid transparent}
 .g.hit{border-color:#ffcc00}
@@ -30,14 +30,14 @@ main{padding:12px 16px;max-width:900px;margin:auto}
 .g .n{font-size:22px;font-weight:800}
 .g input{width:100%;background:#111;color:#eee;border:1px solid #444;border-radius:6px;padding:4px;margin-top:4px;font-size:13px}
 .g .c{font-size:13px;color:#aaa}
-label{font-size:13px;color:#bbb}
+label{font-size:13px;color:#bbb;display:block;margin-top:6px}
 input[type=range]{width:100%}
-#log{font-family:monospace;font-size:11px;color:#888;white-space:pre-wrap;max-height:160px;overflow:auto;background:#0a0a0a;padding:8px;border-radius:8px}
+#log{font-family:monospace;font-size:11px;color:#888;white-space:pre-wrap;max-height:180px;overflow:auto;background:#0a0a0a;padding:8px;border-radius:8px}
 h2{font-size:15px;margin:18px 0 6px;color:#ccc}
 </style>
 </head>
 <body>
-<header><h1>Card Matcher</h1><span id="cvstat">Loading OpenCV…</span></header>
+<header><h1>Card Matcher v2</h1><span id="cvstat">Loading OpenCV…</span></header>
 <main>
 <input id="file" type="file" accept="image/*" capture="environment" hidden>
 <button class="btn" id="snap" disabled>📷 Photograph Card</button>
@@ -48,12 +48,15 @@ h2{font-size:15px;margin:18px 0 6px;color:#ccc}
 </div>
 <div id="result">Take a photo of a card to begin</div>
 <div id="views">
-<div><canvas id="cIn"></canvas>Detected outline</div>
-<div><canvas id="cWarp"></canvas>Flattened card</div>
+<div><canvas id="cIn"></canvas>Outline</div>
+<div><canvas id="cWarp"></canvas>Flattened</div>
+<div><canvas id="cDiff"></canvas>Diff vs best</div>
 </div>
-<label>Match threshold (RANSAC inliers): <b id="thv">20</b></label>
-<input type="range" id="th" min="8" max="80" value="20">
-<label><input type="checkbox" id="useDetect" checked> Auto-detect card edges (uncheck if card fills frame)</label>
+<label>Alignment minimum (RANSAC inliers): <b id="thv">15</b></label>
+<input type="range" id="th" min="6" max="80" value="15">
+<label>Max difference for SAME card: <b id="dtv">12</b>%</label>
+<input type="range" id="dt" min="2" max="40" value="12">
+<label><input type="checkbox" id="useDetect" checked> Auto-detect card edges</label>
 <h2>Groups (<span id="gcount">0</span>) · Cards scanned: <span id="total">0</span></h2>
 <div id="groups"></div>
 <h2>Log</h2>
@@ -67,7 +70,7 @@ function log(s){const l=$('log');l.textContent=new Date().toLocaleTimeString()+'
 function onCvReady(){
   orb=new cv.ORB(1500);
   bf=new cv.BFMatcher(cv.NORM_HAMMING,false);
-  ready=true;$('cvstat').textContent='OpenCV ready';$('snap').disabled=false;log('OpenCV loaded');
+  ready=true;$('cvstat').textContent='OpenCV ready';$('snap').disabled=false;log('OpenCV loaded (v2: alignment + pixel diff)');
 }
 function loadCv(){
   const s=document.createElement('script');
@@ -82,6 +85,7 @@ function loadCv(){
 }
 loadCv();
 $('th').oninput=e=>{$('thv').textContent=e.target.value;};
+$('dt').oninput=e=>{$('dtv').textContent=e.target.value;};
 $('snap').onclick=()=>$('file').click();
 $('file').onchange=e=>{
   const f=e.target.files[0];if(!f)return;
@@ -125,8 +129,7 @@ function findCard(src){
 }
 function warpCard(src,pts){
   let [tl,tr,br,bl]=pts;
-  const wTop=dist(tl,tr),hLeft=dist(tl,bl);
-  const landscape=wTop>hLeft;
+  const landscape=dist(tl,tr)>dist(tl,bl);
   const dw=landscape?H:W,dh=landscape?W:H;
   const sM=cv.matFromArray(4,1,cv.CV_32FC2,[tl.x,tl.y,tr.x,tr.y,br.x,br.y,bl.x,bl.y]);
   const dM=cv.matFromArray(4,1,cv.CV_32FC2,[0,0,dw,0,dw,dh,0,dh]);
@@ -137,33 +140,60 @@ function warpCard(src,pts){
   return out;
 }
 function features(card){
-  const g=new cv.Mat();
-  cv.cvtColor(card,g,cv.COLOR_RGBA2GRAY);
+  const gray=new cv.Mat();
+  cv.cvtColor(card,gray,cv.COLOR_RGBA2GRAY);
+  const g=gray.clone();
   const cl=new cv.CLAHE(2.0,new cv.Size(8,8));cl.apply(g,g);cl.delete();
   const kp=new cv.KeyPointVector(),des=new cv.Mat(),m=new cv.Mat();
   orb.detectAndCompute(g,m,kp,des);
   const pts=[];for(let i=0;i<kp.size();i++){const p=kp.get(i).pt;pts.push([p.x,p.y]);}
   g.delete();kp.delete();m.delete();
-  return {des,pts};
+  return {des,pts,gray};
 }
-function score(q,r){
-  if(q.des.rows<10||r.des.rows<10)return 0;
+function diffFrac(qg,rg,Hm,show){
+  const sz=new cv.Size(rg.cols,rg.rows);
+  const wq=new cv.Mat(),ones=new cv.Mat(qg.rows,qg.cols,cv.CV_8UC1,new cv.Scalar(255)),wm=new cv.Mat();
+  cv.warpPerspective(qg,wq,Hm,sz);cv.warpPerspective(ones,wm,Hm,sz);
+  const s=new cv.Size(100,140),a=new cv.Mat(),b=new cv.Mat(),m=new cv.Mat();
+  cv.resize(wq,a,s,0,0,cv.INTER_AREA);cv.resize(rg,b,s,0,0,cv.INTER_AREA);cv.resize(wm,m,s,0,0,cv.INTER_NEAREST);
+  cv.GaussianBlur(a,a,new cv.Size(5,5),0);cv.GaussianBlur(b,b,new cv.Size(5,5),0);
+  const A=a.data,B=b.data,M=m.data,N=A.length;
+  let n=0,sa=0,sb=0,saa=0,sbb=0;
+  for(let i=0;i<N;i++){if(M[i]>200){n++;sa+=A[i];sb+=B[i];saa+=A[i]*A[i];sbb+=B[i]*B[i];}}
+  let frac=1;
+  if(n>N*0.5){
+    const ma=sa/n,mb=sb/n,da=Math.sqrt(Math.max(saa/n-ma*ma,1)),db=Math.sqrt(Math.max(sbb/n-mb*mb,1));
+    let bad=0;const vis=show?new cv.Mat(140,100,cv.CV_8UC1,new cv.Scalar(0)):null;
+    for(let i=0;i<N;i++){
+      if(M[i]>200){
+        const d=Math.abs((A[i]-ma)/da-(B[i]-mb)/db);
+        if(d>1.0)bad++;
+        if(vis)vis.data[i]=Math.min(255,Math.round(d*120));
+      }
+    }
+    frac=bad/n;
+    if(vis){const big=new cv.Mat();cv.resize(vis,big,new cv.Size(200,280),0,0,cv.INTER_NEAREST);cv.imshow($('cDiff'),big);big.delete();vis.delete();}
+  }
+  wq.delete();ones.delete();wm.delete();a.delete();b.delete();m.delete();
+  return frac;
+}
+function align(q,r){
+  if(q.des.rows<10||r.des.rows<10)return {inl:0,H:null};
   const mv=new cv.DMatchVectorVector();
   bf.knnMatch(q.des,r.des,mv,2);
   const a=[],b=[];
   for(let i=0;i<mv.size();i++){
-    const m=mv.get(i);
-    if(m.size()<2){continue;}
+    const m=mv.get(i);if(m.size()<2)continue;
     const m0=m.get(0),m1=m.get(1);
-    if(m0.distance<0.75*m1.distance){a.push(...q.pts[m0.queryIdx]);b.push(...r.pts[m0.trainIdx]);}
+    if(m0.distance<0.8*m1.distance){a.push(...q.pts[m0.queryIdx]);b.push(...r.pts[m0.trainIdx]);}
   }
   mv.delete();
-  const n=a.length/2;if(n<8)return n>0?Math.min(n,4):0;
+  const n=a.length/2;if(n<8)return {inl:0,H:null};
   const A=cv.matFromArray(n,1,cv.CV_32FC2,a),B=cv.matFromArray(n,1,cv.CV_32FC2,b),mask=new cv.Mat();
-  let inl=0;
-  try{const Hm=cv.findHomography(A,B,cv.RANSAC,6,mask);if(!Hm.empty())inl=cv.countNonZero(mask);Hm.delete();}catch(err){inl=0;}
+  let inl=0,Hm=null;
+  try{Hm=cv.findHomography(A,B,cv.RANSAC,6,mask);if(Hm.empty()){Hm.delete();Hm=null;}else inl=cv.countNonZero(mask);}catch(err){Hm=null;}
   A.delete();B.delete();mask.delete();
-  return inl;
+  return {inl,H:Hm};
 }
 function thumb(card){
   const c=document.createElement('canvas');cv.imshow(c,card);
@@ -184,35 +214,46 @@ function process(img){
   ctx.strokeStyle=detected?'#00ff66':'#ff3333';ctx.lineWidth=6;ctx.beginPath();
   pts.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.closePath();ctx.stroke();
   const f=features(card);
-  const th=+$('th').value;
-  let best=-1,bestS=0,scores=[];
-  groups.forEach((g,gi)=>{
-    let s=0;g.samples.forEach(r=>{s=Math.max(s,score(f,r));});
-    scores.push([gi,s]);if(s>bestS){bestS=s;best=gi;}
-  });
-  scores.sort((x,y)=>y[1]-x[1]);
-  const top=scores.slice(0,3).map(([gi,s])=>`G${groups[gi].id}:${s}`).join('  ');
-  const ms=Math.round(performance.now()-t0);
   const R=$('result');
   if(f.des.rows<10){
     R.className='fail';R.innerHTML=`Not enough detail found<div id="detail">${f.des.rows} keypoints · try better light / closer</div>`;
-    f.des.delete();card.delete();src.delete();return;
+    f.des.delete();f.gray.delete();card.delete();src.delete();return;
   }
+  const th=+$('th').value,dt=+$('dt').value/100;
+  const res=[];
+  groups.forEach((g,gi)=>{
+    let bestD=1,bestI=0,bestH=null,bestR=null;
+    g.samples.forEach(r=>{
+      const al=align(f,r);
+      if(al.H&&al.inl>=th){
+        const d=diffFrac(f.gray,r.gray,al.H,false);
+        if(d<bestD){bestD=d;bestI=al.inl;if(bestH)bestH.delete();bestH=al.H;bestR=r;}else al.H.delete();
+      }else{if(al.H)al.H.delete();if(al.inl>bestI&&bestD===1)bestI=al.inl;}
+    });
+    res.push({gi,d:bestD,inl:bestI,H:bestH,r:bestR});
+  });
+  res.sort((x,y)=>x.d-y.d);
+  const best=res[0];
+  const ctxD=$('cDiff').getContext('2d');ctxD.clearRect(0,0,$('cDiff').width,$('cDiff').height);
+  if(best&&best.H)diffFrac(f.gray,best.r.gray,best.H,true);
+  res.forEach(x=>{if(x.H)x.H.delete();});
+  const top=res.slice(0,3).map(x=>`G${groups[x.gi].id}: ${x.inl}inl/${x.d<1?Math.round(x.d*100)+'%':'—'}`).join('  ');
+  const ms=Math.round(performance.now()-t0);
   let gi,isNew;
-  if(best>=0&&bestS>=th){
-    gi=best;isNew=false;const g=groups[gi];g.count++;
+  if(best&&best.d<=dt){
+    gi=best.gi;isNew=false;const g=groups[gi];g.count++;
     if(g.samples.length<MAX_SAMPLES)g.samples.push(f);
     R.className='match';
-    R.innerHTML=`REPEAT → Group ${g.id}${g.name?' ('+g.name+')':''}<div id="detail">${bestS} inliers · ${f.pts.length} kp · ${ms} ms · edges ${detected?'found':'NOT found'}<br>${top}</div>`;
+    R.innerHTML=`REPEAT → Group ${g.id}${g.name?' ('+g.name+')':''}<div id="detail">diff ${Math.round(best.d*100)}% (max ${Math.round(dt*100)}%) · ${best.inl} inliers · ${ms} ms · edges ${detected?'found':'NOT found'}<br>${top}</div>`;
   }else{
     const id=groups.length?Math.max(...groups.map(g=>g.id))+1:1;
     groups.push({id,name:'',count:1,samples:[f],thumb:thumb(card)});
     gi=groups.length-1;isNew=true;
     R.className='new';
-    R.innerHTML=`NEW CARD → Group ${id}<div id="detail">best other: ${bestS} inliers (threshold ${th}) · ${f.pts.length} kp · ${ms} ms · edges ${detected?'found':'NOT found'}<br>${top||'first card'}</div>`;
+    R.innerHTML=`NEW CARD → Group ${id}<div id="detail">closest: ${best?(best.d<1?Math.round(best.d*100)+'% diff':'no alignment'):'first card'} (max ${Math.round(dt*100)}%) · ${f.pts.length} kp · ${ms} ms · edges ${detected?'found':'NOT found'}<br>${top}</div>`;
   }
   history.push({gid:groups[gi].id,isNew,f});
-  log(`${isNew?'NEW':'MATCH'} G${groups[gi].id} best=${bestS} th=${th} kp=${f.pts.length} ${ms}ms | ${top}`);
+  log(`${isNew?'NEW':'MATCH'} G${groups[gi].id} kp=${f.pts.length} ${ms}ms | ${top||'first'}`);
   card.delete();src.delete();
   render(groups[gi].id);
 }
@@ -240,8 +281,7 @@ $('forceNew').onclick=()=>{
   const g=groups.find(x=>x.id===h.gid);g.count--;
   const si=g.samples.indexOf(h.f);if(si>0)g.samples.splice(si,1);
   const id=Math.max(...groups.map(x=>x.id))+1;
-  const c=$('cWarp');
-  groups.push({id,name:'',count:1,samples:[h.f],thumb:c.toDataURL('image/jpeg',0.8)});
+  groups.push({id,name:'',count:1,samples:[h.f],thumb:$('cWarp').toDataURL('image/jpeg',0.8)});
   h.gid=id;h.isNew=true;
   $('result').className='new';$('result').textContent='Moved last card → new Group '+id;log('FORCE NEW G'+id);render(id);
 };
